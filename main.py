@@ -148,9 +148,13 @@ async def parse_command(bot: IrcBot, match: re.Match, message: Message, model: s
     text = m.group(2)
     context.append({"role": "user", "content": text})
     response = ai_respond(list(context), model, provider=provider)
+    context.append({"role": "assistant", "content": response})
     print(f"{response=}")
     return generate_formatted_ai_response(message.nick, response)
 
+async def clear_context(bot: IrcBot, match: re.Match, message: Message):
+    get_user_context(message.nick).clear()
+    return f"{message.nick}: Context cleared."
 
 async def onConnect(bot: IrcBot):
     for channel in CHANNELS:
