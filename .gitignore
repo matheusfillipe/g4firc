@@ -1,4 +1,5 @@
 accounts.txt
+.env
 gpt4free/
 .venv/
 venv/

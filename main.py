@@ -1,14 +1,21 @@
+import json
 import re
 from collections import deque
 from functools import lru_cache
 from typing import List
 
 import g4f
+from dotenv import dotenv_values
 from g4f import Provider
 from IrcBot.bot import MAX_MESSAGE_LEN, Color, IrcBot, Message, utils
 
-# CHANNELS = ["#bots", "#romanian"]
-CHANNELS = ["#bots"]
+config = dotenv_values()
+NICK = config["NICK"]
+SERVER = config["SERVER"]
+CHANNELS = json.loads(config["CHANNELS"])
+PORT = int(config.get("PORT") or 6667)
+PASSWORD = config["PASSWORD"] if "PASSWORD" in config else None
+SSL = config["SSL"] == "True"
 
 COMMANDS = [
     (
@@ -177,5 +184,5 @@ if __name__ == "__main__":
             "simplify": None,
         }
 
-    bot = IrcBot("irc.dot.org.es", nick="_gptbot")
+    bot = IrcBot(SERVER, nick=NICK, port=PORT, use_ssl=SSL, password=PASSWORD)
     bot.runWithCallback(onConnect)
