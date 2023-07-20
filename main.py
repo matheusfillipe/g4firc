@@ -24,6 +24,11 @@ COMMANDS = [
         "Lists available providers with their info like model and url. Same as providers",
     ),
     (
+        "info",
+        "Gets info about one specific provider",
+        "Gets info about one specific provider. Usage: !info <provider>",
+    ),
+    (
         "providers",
         "List all providers",
         "Lists available providers with their info like model and url. Same as list",
@@ -152,9 +157,19 @@ async def parse_command(bot: IrcBot, match: re.Match, message: Message, model: s
     print(f"{response=}")
     return generate_formatted_ai_response(message.nick, response)
 
+
+async def get_info(bot: IrcBot, match: re.Match, message: Message):
+    provider_str = match.group(1)
+    provider = command_to_provider.get(provider_str)
+    if provider is None:
+        return f"{message.nick}: Provider '{provider_str}' not found. Try !list or !providers."
+    return f"{message.nick}: {format_provider(provider)}"
+
+
 async def clear_context(bot: IrcBot, match: re.Match, message: Message):
     get_user_context(message.nick).clear()
     return f"{message.nick}: Context cleared."
+
 
 async def onConnect(bot: IrcBot):
     for channel in CHANNELS:
@@ -166,6 +181,8 @@ if __name__ == "__main__":
         lower_name = command.lower()
         if command in ["list", "providers"]:
             func = list_providers
+        elif command == "info":
+            func = get_info
         elif command == "clear":
             func = lambda _, message: get_user_context(message.nick).clear()
         elif command in ["gpt3", "gpt4", "gpt"]:
