@@ -17,6 +17,8 @@ PORT = int(config.get("PORT") or 6667)
 PASSWORD = config["PASSWORD"] if "PASSWORD" in config else None
 SSL = config["SSL"] == "True"
 
+PROVIDER_BLACKLIST = ["bing"]
+
 COMMANDS = [
     (
         "list",
@@ -36,6 +38,9 @@ COMMANDS = [
     ("gpt3", "Generate text with GPT-3", "Generates text with GPT-3.5"),
     ("gpt4", "Generate text with GPT-4", "Generates text with GPT-4"),
     ("gpt", "Generate text with GPT-4", "Generates text with GPT-4. Same as gpt4"),
+    ("llama", "Generate text with Llama", "Generates text with Llama"),
+    ("falcon", "Generate text with Falcon", "Generates text with Falcon"),
+    ("davinci", "Generate text with Davinci", "Generates text with Davinci"),
     (
         "clear",
         "Clears context",
@@ -47,6 +52,9 @@ model_map = {
     "gpt3": "gpt-3.5-turbo",
     "gpt4": "gpt-4",
     "gpt": "gpt-4",
+    "llama": "llama-13b",
+    "falcon": "falcon-40b",
+    "davinci": "text-davinci-003",
 }
 
 
@@ -55,17 +63,21 @@ utils.setHelpHeader(
     "GPT bot! Generate text using gtp4free. Context is saved for each user individually and between different providers."
 )
 
+
+def get_profider_name(provider):
+    return provider.__name__.split(".")[-1]
+
+
 # Load all modules from Provider.Providers
 providers = [getattr(Provider, provider) for provider in dir(Provider) if not provider.startswith("__")]
 providers = [
     provider
     for provider in providers
-    if hasattr(provider, "model") and provider.model is not None and provider.needs_auth is False
+    if hasattr(provider, "model")
+    and provider.model is not None
+    and provider.needs_auth is False
+    and get_profider_name(provider).lower() not in PROVIDER_BLACKLIST
 ]
-
-
-def get_profider_name(provider):
-    return provider.__name__.split(".")[-1]
 
 
 command_to_provider = {get_profider_name(provider).lower(): provider for provider in providers}
@@ -85,7 +97,7 @@ for provider in providers:
     )
 
 
-def ai_respond(messages: list[dict], model: str, provider=None) -> str:
+def ai_respond(messages: list[dict], model: str | None = None, provider=None) -> str:
     """Generate a response from the AI."""
     return g4f.ChatCompletion.create(model, messages, provider=provider, stream=False)
 
@@ -116,13 +128,20 @@ def format_provider(provider: Provider) -> str:
     name = get_profider_name(provider)
     model = str(provider.model)[:64]
     url = provider.url
-    available = Color("Yes", fg=Color.green).str if provider.working else Color("No", fg=Color.red).str
-    return f"{name} {model=} {url=} -- available: {available}"
+    working = Color("Yes", fg=Color.green).str if provider.working else Color("No", fg=Color.red).str
+    return f"{name} {model=} {url=} -- working: {working}"
 
 
-def list_providers(_, message: Message) -> list[str]:
+def list_providers(_, message: Message) -> list[str] | str:
     """List all providers."""
-    return [message.nick + ": " + m for m in [format_provider(p) for p in providers]]
+    text = message.text
+    m = re.match(r"^!(\S+) (.*)$", text)
+    if m is None or len(m.groups()) < 2:
+        return [message.nick + ": " + m for m in [format_provider(p) for p in providers if p.working]]
+    arg = m.group(2)
+    if arg.lower() in ["all", "-a", "a"]:
+        return [message.nick + ": " + m for m in [format_provider(p) for p in providers]]
+    return f"{message.nick}: Unknown argument {arg}. Valid arguments are: all, -a, a"
 
 
 @lru_cache(maxsize=2048)
@@ -131,16 +150,20 @@ def get_user_context(nick: str) -> list[dict]:
     return deque([], maxlen=1024)
 
 
-async def parse_command(bot: IrcBot, match: re.Match, message: Message, model: str = None):
+async def parse_command(
+    bot: IrcBot,
+    match: re.Match,
+    message: Message,
+    model: str | None = None,
+    provider=None,
+):
     context = get_user_context(message.nick)
     text = message.text
     m = re.match(r"^!(\S+) (.*)$", text)
     if m is None or len(m.groups()) != 2:
         return f"{message.nick}: What?"
 
-    if model is not None:
-        provider = None
-    else:
+    if provider is None:
         command = m.group(1)
         provider = command_to_provider.get(command)
         if provider is None:
@@ -148,13 +171,14 @@ async def parse_command(bot: IrcBot, match: re.Match, message: Message, model: s
 
         if provider is None:
             return f"{message.nick}: Provider '{command}' not found. Try !list or !providers."
+
+    if model is None:
         model = provider.model[0]
 
     text = m.group(2)
     context.append({"role": "user", "content": text})
     response = ai_respond(list(context), model, provider=provider)
     context.append({"role": "assistant", "content": response})
-    print(f"{response=}")
     return generate_formatted_ai_response(message.nick, response)
 
 
@@ -184,14 +208,24 @@ if __name__ == "__main__":
         elif command == "info":
             func = get_info
         elif command == "clear":
-            func = lambda _, message: get_user_context(message.nick).clear()
-        elif command in ["gpt3", "gpt4", "gpt"]:
+            func = clear_context
+        elif command in model_map:
             model = model_map[command]
+            for provider in providers:
+                if model in provider.model and provider.working:
+                    break
+            else:
+                provider = None
 
-            async def _func(bot, match, message):
-                return await parse_command(bot, match, message, model=model)
+            def _wrap(provider, model):
+                async def _func(bot, match, message):
+                    if provider is None:
+                        return f"{message.nick}: No working provider found for {model=}"
+                    return await parse_command(bot, match, message, model=model, provider=provider)
 
-            func = _func
+                return _func
+
+            func = _wrap(provider, model)
 
         else:
             func = parse_command
