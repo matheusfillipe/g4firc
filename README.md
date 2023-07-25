@@ -14,3 +14,13 @@ Docker is for now not available but I would be happy if someone contributes a PR
 * Whatever else is needed to make g4f works (currently needs to be locally build, pip pakcage might not work)
 * `cp .env.example .env`
 * run `main.py` (directly or with pm2)
+
+## Workaround for broken g4f package
+
+As of the time of this commit g4f pip package installation is broken and some providers are missing. You can ignore the step above to pip install and do it manually or fix it with something like:
+
+```bash
+git clone https://github.com/xtekky/gpt4free.git
+cd gpt4free
+cp -r g4f/Provider/Providers/* ../.venv/lib/python3.10/site-packages/g4f/Provider/Providers/
+```
