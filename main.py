@@ -5,9 +5,10 @@ from functools import lru_cache
 from typing import List
 
 import g4f
+import requests
 from dotenv import dotenv_values
 from g4f import Provider
-from IrcBot.bot import MAX_MESSAGE_LEN, Color, IrcBot, Message, utils
+from IrcBot.bot import MAX_MESSAGE_LEN, Color, IrcBot, Message, persistentData, utils
 
 config = dotenv_values()
 NICK = config["NICK"]
@@ -16,6 +17,8 @@ CHANNELS = json.loads(config["CHANNELS"])
 PORT = int(config.get("PORT") or 6667)
 PASSWORD = config["PASSWORD"] if "PASSWORD" in config else None
 SSL = config["SSL"] == "True"
+DATABASE = config.get("DATABASE") or "database.db"
+MAX_CHATS_PER_USER = int(config.get("MAX_CHATS_PER_USER") or 10)
 
 PROVIDER_BLACKLIST = ["bing"]
 
@@ -45,6 +48,26 @@ COMMANDS = [
         "clear",
         "Clears context",
         "Clears context for the user. Starts a fresh converstaion.",
+    ),
+    (
+        "save",
+        "Saves the context permanently",
+        "Saves the context permanently. You can restore it later with !load. Usage: !save",
+    ),
+    (
+        "load",
+        "Loads the context permanently",
+        "Loads the context permanently. You can use !history to see available chat histories to switch to. Usage: !load <chat_id>",
+    ),
+    (
+        "history",
+        "Lists all saved chat histories",
+        "Lists all saved chat histories. Use !save or !load to manage them. Usage: !history",
+    ),
+    (
+        "paste",
+        "Pastes the context to pastebin",
+        "Pastes all lines of the current context to ix.io. Usage: !paste",
     ),
 ]
 
@@ -81,8 +104,6 @@ providers = [
 
 
 command_to_provider = {get_profider_name(provider).lower(): provider for provider in providers}
-print(command_to_provider)
-
 
 for provider in providers:
     name = get_profider_name(provider)
@@ -95,6 +116,82 @@ for provider in providers:
             f"Generates text with {name}. {model=} {url=}",
         )
     )
+
+
+chats = persistentData(DATABASE, "chats", ["nick", "chat", "headline"])
+message_history = persistentData(DATABASE, "messages", ["nick", "role", "chat", "message"])
+
+
+@lru_cache(maxsize=512)
+def get_user_context(nick: str) -> deque[dict]:
+    """Get the user context."""
+    return deque([], maxlen=1024)
+
+
+def list_chats(nick: str) -> list[str]:
+    """List all chats."""
+    return [f'{nick}: {chat["chat"]} -> {chat["headline"]}' for chat in chats.data if chat["nick"] == nick]
+
+
+def load_chat_history(nick: str, chat_id: int):
+    """Load the chat history and replace the cache."""
+    for chat in chats.data:
+        if chat["nick"] == nick and chat["chat"] == chat_id:
+            break
+    else:
+        raise KeyError(f"Chat {chat_id} not found for user {nick}")
+    history = [
+        {"role": message["role"], "content": message["message"]}
+        for message in message_history.data
+        if message["nick"] == nick and message["chat"] == chat_id
+    ]
+    cache = get_user_context(nick)
+    cache.clear()
+    cache.extend(history)
+
+
+def del_chat_history(nick: str, chat_id: int):
+    """Delete the chat history and messages."""
+    for chat in chats.data:
+        if chat["nick"] == nick and chat["chat"] == chat_id:
+            chats.pop(chat["id"])
+            break
+    else:
+        raise KeyError(f"Chat {chat_id} not found for user {nick}")
+    ids = []
+    for message in message_history.data:
+        if message["nick"] == nick and message["chat"] == chat_id:
+            ids.append(message["id"])
+    for id in ids:
+        message_history.pop(id)
+
+
+def save_chat_history(nick: str):
+    """Save the chat history to the database.
+
+    Make sure the maximum is respected and the oldest is dropped
+    """
+    chat_ids = []
+    for chat in chats.data:
+        if chat["nick"] == nick:
+            chat_ids.append(int(chat["chat"]))
+    chat_id = max(chat_ids) + 1 if chat_ids else 0
+    if len(chat_ids) >= MAX_CHATS_PER_USER:
+        del_chat_history(nick, min(chat_ids))
+    cache = get_user_context(nick)
+
+    max_content_len = 64
+    chats.push({"nick": nick, "chat": chat_id, "headline": cache[-1]["content"][:max_content_len]})
+    message_history.push(
+        [{"nick": nick, "role": message["role"], "chat": chat_id, "message": message["content"]} for message in cache]
+    )
+
+
+def pastebin(text) -> str:
+    url = "http://ix.io"
+    payload = {"f:1=<-": text}
+    response = requests.request("POST", url, data=payload)
+    return response.text
 
 
 def ai_respond(messages: list[dict], model: str | None = None, provider=None) -> str:
@@ -144,12 +241,6 @@ def list_providers(_, message: Message) -> list[str] | str:
     return f"{message.nick}: Unknown argument {arg}. Valid arguments are: all, -a, a"
 
 
-@lru_cache(maxsize=2048)
-def get_user_context(nick: str) -> list[dict]:
-    """Get the user context."""
-    return deque([], maxlen=1024)
-
-
 async def parse_command(
     bot: IrcBot,
     match: re.Match,
@@ -195,9 +286,10 @@ async def clear_context(bot: IrcBot, match: re.Match, message: Message):
     return f"{message.nick}: Context cleared."
 
 
-async def onConnect(bot: IrcBot):
+async def on_connect(bot: IrcBot):
     for channel in CHANNELS:
         await bot.join(channel)
+    await bot.send_raw(f"MODE {bot.nick} +B")
 
 
 if __name__ == "__main__":
@@ -209,6 +301,50 @@ if __name__ == "__main__":
             func = get_info
         elif command == "clear":
             func = clear_context
+        elif command == "paste":
+
+            async def _func_paste(bot, match, message):
+                text = "\n".join([f'{m["role"]}: {m["content"]}' for m in get_user_context(message.nick)])
+                return pastebin(text)
+
+            func = _func_paste
+
+        elif command == "save":
+
+            async def _func_save(bot, match, message):
+                save_chat_history(message.nick)
+                return f"{message.nick}: Chat saved!"
+
+            func = _func_save
+
+        elif command == "load":
+
+            async def _func_load(bot, match, message):
+                text = message.text
+                m = re.match(r"^!(\S+) (.*)$", text)
+                if m is None or len(m.groups()) < 2:
+                    return f"{message.nick}: Chat id is required as an argument. Use !history to list all chats."
+                arg = m.group(2)
+                if not arg.isdigit():
+                    return f"{message.nick}: Chat id must be an integer. Use !history to list all chats."
+                try:
+                    load_chat_history(message.nick, int(arg))
+                except KeyError:
+                    return f"{message.nick}: Chat id {arg} not found. Use !history to list all chats."
+                return f"{message.nick}: Chat loaded!"
+
+            func = _func_load
+
+        elif command == "history":
+
+            async def _func_list(bot, match, message):
+                chatlist = list_chats(message.nick)
+                if len(chatlist) == 0:
+                    return f"{message.nick}: No saved chats found."
+                return chatlist
+
+            func = _func_list
+
         elif command in model_map:
             model = model_map[command]
             for provider in providers:
@@ -239,5 +375,5 @@ if __name__ == "__main__":
             "simplify": None,
         }
 
-    bot = IrcBot(SERVER, nick=NICK, port=PORT, use_ssl=SSL, password=PASSWORD)
-    bot.runWithCallback(onConnect)
+    bot = IrcBot(SERVER, nick=NICK, port=PORT, use_ssl=SSL, password=PASSWORD, tables=[chats, message_history])
+    bot.runWithCallback(on_connect)
