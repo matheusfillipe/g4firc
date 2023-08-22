@@ -88,26 +88,38 @@ utils.setHelpHeader(
 
 
 def get_profider_name(provider):
-    return provider.__name__.split(".")[-1]
+    return provider.__name__
 
 
 # Load all modules from Provider.Providers
-providers = [getattr(Provider, provider) for provider in dir(Provider) if not provider.startswith("__")]
+providers = [
+    getattr(Provider, provider)
+    for provider in Provider.__all__
+    if not provider.startswith("__") and getattr(Provider, provider) is not Provider.base_provider.BaseProvider
+]
 providers = [
     provider
     for provider in providers
-    if hasattr(provider, "model")
-    and provider.model is not None
-    and provider.needs_auth is False
+    if provider.needs_auth is False
     and get_profider_name(provider).lower() not in PROVIDER_BLACKLIST
 ]
 
-
 command_to_provider = {get_profider_name(provider).lower(): provider for provider in providers}
 
+all_models = [getattr(g4f.models, model_name) for model_name in dir(g4f.models) if isinstance(getattr(g4f.models, model_name), g4f.models.Model)]
 for provider in providers:
     name = get_profider_name(provider)
-    model = provider.model
+    model = []
+    if provider.supports_gpt_35_turbo:
+        model.append("gpt-3.5-turbo")
+    if provider.supports_gpt_4:
+        model.append("gpt-4")
+
+    for m in all_models:
+        if m.best_provider == provider:
+            model.append(m.name)
+
+    provider.model = model
     url = provider.url
     COMMANDS.append(
         (
@@ -220,7 +232,7 @@ def generate_formatted_ai_response(nickname: str, text: str) -> List[str]:
     return lines
 
 
-def format_provider(provider: Provider) -> str:
+def format_provider(provider: Provider.BaseProvider) -> str:
     """Format the provider."""
     name = get_profider_name(provider)
     model = str(provider.model)[:64]
