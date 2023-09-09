@@ -3,3 +3,4 @@ re-ircbot==1.6.5
 python-dotenv==1.0.0
 requests==2.31.0
 curl_cffi
+trio_asyncio==0.12.0

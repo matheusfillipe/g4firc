@@ -10,6 +10,8 @@ from dotenv import dotenv_values
 from g4f import Provider
 from IrcBot.bot import MAX_MESSAGE_LEN, Color, IrcBot, Message, persistentData, utils
 
+import g4fwrapper
+
 config = dotenv_values()
 NICK = config["NICK"]
 SERVER = config["SERVER"]
@@ -100,13 +102,16 @@ providers = [
 providers = [
     provider
     for provider in providers
-    if provider.needs_auth is False
-    and get_profider_name(provider).lower() not in PROVIDER_BLACKLIST
+    if provider.needs_auth is False and get_profider_name(provider).lower() not in PROVIDER_BLACKLIST
 ]
 
 command_to_provider = {get_profider_name(provider).lower(): provider for provider in providers}
 
-all_models = [getattr(g4f.models, model_name) for model_name in dir(g4f.models) if isinstance(getattr(g4f.models, model_name), g4f.models.Model)]
+all_models = [
+    getattr(g4f.models, model_name)
+    for model_name in dir(g4f.models)
+    if isinstance(getattr(g4f.models, model_name), g4f.models.Model)
+]
 for provider in providers:
     name = get_profider_name(provider)
     model = []
@@ -206,9 +211,9 @@ def pastebin(text) -> str:
     return response.text
 
 
-def ai_respond(messages: list[dict], model: str | None = None, provider=None) -> str:
+async def ai_respond(messages: list[dict], model: str | None = None, provider=None) -> str:
     """Generate a response from the AI."""
-    return g4f.ChatCompletion.create(model, messages, provider=provider, stream=False)
+    return await g4fwrapper.create(model, messages, provider=provider, stream=False)
 
 
 def preprocess(text: str) -> List[str]:
@@ -280,7 +285,7 @@ async def parse_command(
 
     text = m.group(2)
     context.append({"role": "user", "content": text})
-    response = ai_respond(list(context), model, provider=provider)
+    response = await ai_respond(list(context), model, provider=provider)
     context.append({"role": "assistant", "content": response})
     return generate_formatted_ai_response(message.nick, response)
 
