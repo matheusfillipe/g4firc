@@ -87,6 +87,7 @@ utils.setPrefix("!")
 utils.setHelpHeader(
     "GPT bot! Generate text using gtp4free. Context is saved for each user individually and between different providers."
 )
+utils.setMaxArguments(400)
 
 
 def get_profider_name(provider):
@@ -125,6 +126,8 @@ for provider in providers:
             model.append(m.name)
 
     provider.model = model
+    if not hasattr(provider, "url"):
+        continue
     url = provider.url
     COMMANDS.append(
         (
@@ -216,6 +219,7 @@ async def ai_respond(messages: list[dict], model: str | None = None, provider=No
     return await g4fwrapper.create(model, messages, provider=provider, stream=False)
 
 
+
 def preprocess(text: str) -> List[str]:
     """Preprocess the text to be sent to the bot.
 
@@ -241,7 +245,10 @@ def format_provider(provider: Provider.BaseProvider) -> str:
     """Format the provider."""
     name = get_profider_name(provider)
     model = str(provider.model)[:64]
-    url = provider.url
+    if not hasattr(provider, "url"):
+        url = ""
+    else:
+        url = provider.url
     working = Color("Yes", fg=Color.green).str if provider.working else Color("No", fg=Color.red).str
     return f"{name} {model=} {url=} -- working: {working}"
 
@@ -285,9 +292,12 @@ async def parse_command(
 
     text = m.group(2)
     context.append({"role": "user", "content": text})
-    response = await ai_respond(list(context), model, provider=provider)
-    context.append({"role": "assistant", "content": response})
-    return generate_formatted_ai_response(message.nick, response)
+    try:
+        response = await ai_respond(list(context), model, provider=provider)
+        context.append({"role": "assistant", "content": response})
+        return generate_formatted_ai_response(message.nick, response)
+    except Exception as e:
+        return f"{message.nick}: {e} Try another provider"
 
 
 async def get_info(bot: IrcBot, match: re.Match, message: Message):
