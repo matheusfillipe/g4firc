@@ -6,6 +6,8 @@ from typing import List
 
 import g4f
 import requests
+import trio
+from cachetools import TTLCache
 from dotenv import dotenv_values
 from g4f import Provider
 from IrcBot.bot import MAX_MESSAGE_LEN, Color, IrcBot, Message, persistentData, utils
@@ -71,6 +73,11 @@ COMMANDS = [
         "Pastes the context to pastebin",
         "Pastes all lines of the current context to ix.io. Usage: !paste",
     ),
+    (
+        "selftest",
+        "Self tests the bot",
+        "Tests all providers",
+    ),
 ]
 
 model_map = {
@@ -85,12 +92,13 @@ model_map = {
 
 utils.setPrefix("!")
 utils.setHelpHeader(
-    "GPT bot! Generate text using gtp4free. Context is saved for each user individually and between different providers."
+    "GPT bot! Generate text using gtp4free. Context is saved for each user individually and between different providers. Check my DM!"
 )
+utils.setHelpOnPrivate(True)
 utils.setMaxArguments(400)
 
 
-def get_profider_name(provider):
+def get_provider_name(provider):
     return provider.__name__
 
 
@@ -103,10 +111,10 @@ providers = [
 providers = [
     provider
     for provider in providers
-    if provider.needs_auth is False and get_profider_name(provider).lower() not in PROVIDER_BLACKLIST
+    if provider.needs_auth is False and get_provider_name(provider).lower() not in PROVIDER_BLACKLIST
 ]
 
-command_to_provider = {get_profider_name(provider).lower(): provider for provider in providers}
+command_to_provider = {get_provider_name(provider).lower(): provider for provider in providers}
 
 all_models = [
     getattr(g4f.models, model_name)
@@ -114,7 +122,7 @@ all_models = [
     if isinstance(getattr(g4f.models, model_name), g4f.models.Model)
 ]
 for provider in providers:
-    name = get_profider_name(provider)
+    name = get_provider_name(provider)
     model = []
     if provider.supports_gpt_35_turbo:
         model.append("gpt-3.5-turbo")
@@ -219,7 +227,6 @@ async def ai_respond(messages: list[dict], model: str | None = None, provider=No
     return await g4fwrapper.create(model, messages, provider=provider, stream=False)
 
 
-
 def preprocess(text: str) -> List[str]:
     """Preprocess the text to be sent to the bot.
 
@@ -243,25 +250,31 @@ def generate_formatted_ai_response(nickname: str, text: str) -> List[str]:
 
 def format_provider(provider: Provider.BaseProvider) -> str:
     """Format the provider."""
-    name = get_profider_name(provider)
+    name = get_provider_name(provider)
     model = str(provider.model)[:64]
     if not hasattr(provider, "url"):
         url = ""
     else:
         url = provider.url
     working = Color("Yes", fg=Color.green).str if provider.working else Color("No", fg=Color.red).str
-    return f"{name} {model=} {url=} -- working: {working}"
+    return f"{name} {model=} {url=} -- available: {working}"
 
 
-def list_providers(_, message: Message) -> list[str] | str:
+def list_providers(_, message: Message) -> list[Message] | str:
     """List all providers."""
     text = message.text
     m = re.match(r"^!(\S+) (.*)$", text)
+    firstm = Message(channel=message.channel, is_private=False, message="Check my DM!")
     if m is None or len(m.groups()) < 2:
-        return [message.nick + ": " + m for m in [format_provider(p) for p in providers if p.working]]
+        return [
+            Message(channel=message.nick, message=m, is_private=True)
+            for m in [format_provider(p) for p in providers if p.working]
+        ]
     arg = m.group(2)
     if arg.lower() in ["all", "-a", "a"]:
-        return [message.nick + ": " + m for m in [format_provider(p) for p in providers]]
+        return [
+            Message(channel=message.nick, message=m, is_private=True) for m in [format_provider(p) for p in providers]
+        ]
     return f"{message.nick}: Unknown argument {arg}. Valid arguments are: all, -a, a"
 
 
@@ -311,6 +324,67 @@ async def get_info(bot: IrcBot, match: re.Match, message: Message):
 async def clear_context(bot: IrcBot, match: re.Match, message: Message):
     get_user_context(message.nick).clear()
     return f"{message.nick}: Context cleared."
+
+
+async def test_provider(provider: Provider.BaseProvider, sender: trio.MemorySendChannel):
+    """Sends hi to a provider and check if there is response or error."""
+    try:
+        messages = [{"role": "user", "content": "hi"}]
+        model = provider.model[0]
+        text = await g4fwrapper.create(model, messages, provider=provider, stream=False)
+        result = bool(text) and isinstance(text, str)
+    except Exception:
+        result = False
+
+    await sender.send((provider, result))
+    return result
+
+
+working_providers_cache = TTLCache(maxsize=1, ttl=60 * 60)
+self_test_lock = trio.Lock()
+
+
+async def selftest(bot: IrcBot, match: re.Match, message: Message):
+    """Test all providers."""
+    if self_test_lock.locked():
+        return f"{message.nick}: Self test is already running. Please wait."
+
+    await bot.send_message(
+        Message(
+            channel=message.channel,
+            message=f"{message.nick} Checking working providers....",
+            is_private=False,
+        )
+    )
+    if "working_providers" in working_providers_cache:
+        working_providers = working_providers_cache["working_providers"]
+        return f"{message.nick}: Working providers: " + ", ".join(working_providers)
+
+    results = {}
+
+    sender, receiver = trio.open_memory_channel(0)
+
+    async with self_test_lock:
+
+        async def producer():
+            async with sender:
+                for provider in providers:
+                    async with trio.open_nursery() as nursery:
+                        nursery.start_soon(test_provider, provider, sender)
+
+        async def consumer():
+            async with receiver:
+                async for provider, result in receiver:
+                    name = get_provider_name(provider)
+                    results[name] = result
+
+        async with trio.open_nursery() as nursery:
+            nursery.start_soon(producer)
+            nursery.start_soon(consumer)
+
+        working_providers = [p for p, r in results.items() if r]
+        working_providers_cache["working_providers"] = working_providers
+        return f"{message.nick}: Working providers: " + ", ".join(working_providers)
 
 
 async def on_connect(bot: IrcBot):
@@ -390,6 +464,8 @@ if __name__ == "__main__":
 
             func = _wrap(provider, model)
 
+        elif command == "selftest":
+            func = selftest
         else:
             func = parse_command
 
